@@ -30,8 +30,9 @@ from app.config import HF_API_TOKEN
 
 log = logging.getLogger("audio_analyzer")
 
-HF_URL = (
-    "https://api-inference.huggingface.co/models/"
+HF_URL = os.getenv(
+    "HF_EMOTION_URL",
+    "https://router.huggingface.co/hf-inference/models/"
     "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
 )
 
@@ -132,7 +133,10 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
 def classify_emotions(audio_bytes: bytes) -> list[dict]:
     if not HF_API_TOKEN:
         return []
-    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    headers = {
+    "Authorization": f"Bearer {HF_API_TOKEN}",
+    "Content-Type": "audio/wav",
+    }
     try:
         r = requests.post(HF_URL, headers=headers, data=audio_bytes, timeout=30)
         if r.status_code == 503:
