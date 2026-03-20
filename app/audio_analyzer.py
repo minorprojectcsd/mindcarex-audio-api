@@ -6,13 +6,13 @@ Layer 1 — Acoustic features via librosa (runs on server, ~80ms/chunk)
   spectral_entropy (Shannon — erratic speech = high entropy),
   spectral_centroid, MFCC×13, silence_ratio, speaking_rate
 
-Layer 2 — Emotion via HuggingFace Inference API (free, no GPU)
-  Model: ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition
-  Returns: fearful · angry · disgusted · sad · surprised · neutral · happy
+Layer 2 — Emotion analysis
+  Previously: HuggingFace audio emotion model (removed — API discontinued)
+  Now: Groq LLaMA analyses transcript for emotions in report_generator.py
+  Acoustic stress score still works perfectly without emotion layer.
 
 Stress score 0-100:
-  HF token set  → 60% emotion + 40% acoustic
-  No token      → 100% acoustic (still works)
+  100% acoustic (pitch, entropy, ZCR, RMS, silence, centroid)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 from __future__ import annotations
@@ -20,33 +20,11 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import time
 
 import numpy as np
-import requests
 from scipy.stats import entropy as scipy_entropy
 
-from app.config import HF_API_TOKEN
-
 log = logging.getLogger("audio_analyzer")
-
-HF_URL = os.getenv(
-    "HF_EMOTION_URL",
-    "https://router.huggingface.co/hf-inference/models/"
-    "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
-)
-
-EMOTION_WEIGHT: dict[str, float] = {
-    "fearful":   1.00,
-    "angry":     0.85,
-    "disgusted": 0.70,
-    "sad":       0.55,
-    "surprised": 0.30,
-    "neutral":   0.05,
-    "happy":    -0.20,
-}
-HIGH_RISK   = {"fearful"}
-MEDIUM_RISK = {"angry", "disgusted", "sad"}
 
 STATE_LABEL = {
     "calm":            "Calm / Relaxed",
@@ -55,8 +33,10 @@ STATE_LABEL = {
     "high_stress":     "High Stress",
 }
 STATE_COLOR = {
-    "calm": "green", "mild_stress": "yellow",
-    "moderate_stress": "orange", "high_stress": "red",
+    "calm": "green",
+    "mild_stress": "yellow",
+    "moderate_stress": "orange",
+    "high_stress": "red",
 }
 
 
@@ -128,31 +108,16 @@ def extract_features(y: np.ndarray, sr: int) -> dict:
     }
 
 
-# ── HuggingFace emotion API ───────────────────────────────────────────────────
+# ── Emotion classification ────────────────────────────────────────────────────
 
 def classify_emotions(audio_bytes: bytes) -> list[dict]:
-    if not HF_API_TOKEN:
-        return []
-    headers = {
-    "Authorization": f"Bearer {HF_API_TOKEN}",
-    "Content-Type": "audio/wav",
-    }
-    try:
-        r = requests.post(HF_URL, headers=headers, data=audio_bytes, timeout=30)
-        if r.status_code == 503:
-            log.info("HF model cold-starting — retrying in 15s")
-            time.sleep(15)
-            r = requests.post(HF_URL, headers=headers, data=audio_bytes, timeout=30)
-        if r.status_code != 200:
-            log.warning(f"HF {r.status_code}: {r.text[:80]}")
-            return []
-        result = r.json()
-        if isinstance(result, list):
-            return [{"label": e["label"].lower().strip(), "score": round(float(e["score"]), 4)} for e in result]
-        return []
-    except Exception as e:
-        log.warning(f"HF error: {e}")
-        return []
+    """
+    HuggingFace audio emotion API discontinued (all models removed from router).
+    Emotion analysis is now handled by Groq LLaMA reading the transcript
+    in report_generator.py — more accurate for mental health context.
+    Acoustic stress score works perfectly without this layer.
+    """
+    return []
 
 
 # ── Stress score ──────────────────────────────────────────────────────────────
@@ -172,32 +137,21 @@ def compute_stress(features: dict, emotions: list[dict]) -> dict:
       + entr * 0.15 + cent * 0.10
     acoustic *= 100
 
-    emotion_stress = 0.0
-    if emotions:
-        emo_map = {e["label"]: e["score"] for e in emotions}
-        raw = sum(emo_map.get(e, 0.0) * w for e, w in EMOTION_WEIGHT.items())
-        emotion_stress = max(0.0, min(raw * 100, 100.0))
-
-    final = (0.60 * emotion_stress + 0.40 * acoustic) if emotions else acoustic
-    final = round(min(max(final, 0.0), 100.0), 1)
+    # No HF emotions — pure acoustic mode
+    final = round(min(max(acoustic, 0.0), 100.0), 1)
 
     state = ("high_stress"     if final >= 72 else
              "moderate_stress" if final >= 50 else
              "mild_stress"     if final >= 30 else "calm")
-
-    emo_labels = {e["label"] for e in emotions if e["score"] > 0.30}
-    risk = ("high"   if emo_labels & HIGH_RISK   else
-            "medium" if emo_labels & MEDIUM_RISK  else
-            "medium" if final >= 65               else "low")
 
     return {
         "stress_score":       final,
         "mental_state":       state,
         "mental_state_label": STATE_LABEL[state],
         "color":              STATE_COLOR[state],
-        "risk_level":         risk,
-        "top_emotions":       sorted(emotions, key=lambda x: x["score"], reverse=True)[:5],
-        "emotion_stress":     round(emotion_stress, 1),
+        "risk_level":         "low",
+        "top_emotions":       [],
+        "emotion_stress":     0.0,
         "acoustic_stress":    round(acoustic, 1),
     }
 
@@ -217,9 +171,9 @@ def process_chunk(audio_bytes: bytes, chunk_index: int, timestamp_sec: float) ->
         "mental_state_label": stress["mental_state_label"],
         "color":              stress["color"],
         "risk_level":         stress["risk_level"],
-        "top_emotions":       stress["top_emotions"],
+        "top_emotions":       [],
         "acoustic":           features,
-        "emotion_stress":     stress["emotion_stress"],
+        "emotion_stress":     0.0,
         "acoustic_stress":    stress["acoustic_stress"],
-        "mode":               "full" if emotions else "acoustic_only",
+        "mode":               "acoustic_only",
     }
