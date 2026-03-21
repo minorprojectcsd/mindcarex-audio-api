@@ -3,6 +3,7 @@ SVC 1 — Voice Analysis
 Run locally:  uvicorn main:app --reload --port 8000
 Docker:       see Dockerfile
 """
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
